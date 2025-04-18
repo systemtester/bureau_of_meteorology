@@ -1,12 +1,11 @@
 """Config flow for BOM."""
 import logging
-from typing import Any, Dict, List, Optional, Set, Union, cast
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 from homeassistant import config_entries, exceptions
 from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import callback
 
 from .const import (
     CONF_FORECASTS_BASENAME,
@@ -22,7 +21,6 @@ from .const import (
     DOMAIN,
     OBSERVATION_SENSOR_TYPES,
     FORECAST_SENSOR_TYPES,
-    WARNING_SENSOR_TYPES,
 )
 from .PyBoM.collector import Collector
 
