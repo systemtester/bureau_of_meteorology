@@ -3,7 +3,7 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Default-orange.svg?style=for-the-badge)](https://github.com/custom-components/hacs)
 [![GitHub Release][releases-shield]][releases]
 [![License][license-shield]](LICENSE.md)
-![Maintenance](https://img.shields.io/maintenance/yes/2024?style=for-the-badge)
+![Maintenance](https://img.shields.io/maintenance/yes/2025?style=for-the-badge)
 
 ### **This integration only supports locations within Australia.**
 
@@ -40,7 +40,13 @@ logger:
 
 ## Release Notes
 
-### 1.3.5 - Fix for null error warnings and small get_forecasts() response improvement
+### 1.3.5 - Fix for null error warnings and small get_forecasts() response improvement, config_flow optimisations
+- Back-end configuration optimisations on config_flow.py (thinking to future large scale adjustments)
+  - Created a shared `BomFlowHandler` class
+  - Reduced code duplication
+  - Added better defaults handling by adding `get_default_value()`
+  - Improved readability (sensor type dictionaries, type hints, consistent patterns)
+  - Better flow control (centralised navigation between steps and separated flow logic from UI code)
 - Fix null forecast errors. Thanks @systemtester
 - Fix uv_index response in action.get_forecasts() to confirm with HA documented responses Thanks @systemtester
 
