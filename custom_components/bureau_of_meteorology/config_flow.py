@@ -1,5 +1,6 @@
 """Config flow for BOM."""
 import logging
+from typing import Any, Dict, List, Optional
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
@@ -21,10 +22,21 @@ from .const import (
     DOMAIN,
     OBSERVATION_SENSOR_TYPES,
     FORECAST_SENSOR_TYPES,
+    URL_BASE,
 )
 from .PyBoM.collector import Collector
 
 _LOGGER = logging.getLogger(__name__)
+
+# New constants for location search
+CONF_LOCATION_METHOD = "location_method"
+CONF_LOCATION_SEARCH = "location_search"
+CONF_LOCATION_SELECTION = "location_selection"
+
+LOCATION_METHOD_LATLON = "latlon"
+LOCATION_METHOD_SEARCH = "search"
+
+URL_LOCATION_SEARCH = "locations?search="
 
 
 async def validate_location(hass, user_input):
@@ -117,6 +129,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         super().__init__()
         self.data = {}
         self.collector = None
+        self.locations = []
+        # Create a collector with dummy coordinates for API operations
+        # We'll update with real coordinates once we have them
+        self.search_collector = Collector(0, 0)
 
     @staticmethod
     @callback
@@ -127,7 +143,28 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return BomOptionsFlow(config_entry)
 
     async def async_step_user(self, user_input=None):
-        """Handle the initial step."""
+        """Handle the initial step to choose location input method."""
+        data_schema = vol.Schema(
+            {
+                vol.Required(CONF_LOCATION_METHOD, default=LOCATION_METHOD_LATLON): vol.In(
+                    {
+                        LOCATION_METHOD_LATLON: "Enter latitude/longitude",
+                        LOCATION_METHOD_SEARCH: "Search for a location",
+                    }
+                ),
+            }
+        )
+
+        if user_input is None:
+            return self.async_show_form(step_id="user", data_schema=data_schema)
+
+        if user_input[CONF_LOCATION_METHOD] == LOCATION_METHOD_LATLON:
+            return await self.async_step_latlon()
+        else:
+            return await self.async_step_location_search()
+
+    async def async_step_latlon(self, user_input=None):
+        """Handle the latitude/longitude input step."""
         data_schema = vol.Schema(
             {
                 vol.Required(CONF_LATITUDE, default=self.hass.config.latitude): float,
@@ -136,17 +173,120 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
         if user_input is None:
-            return self.async_show_form(step_id="user", data_schema=data_schema)
+            return self.async_show_form(step_id="latlon", data_schema=data_schema)
 
         errors, collector = await validate_location(self.hass, user_input)
         
         if errors:
             return self.async_show_form(
-                step_id="user", data_schema=data_schema, errors=errors
+                step_id="latlon", data_schema=data_schema, errors=errors
             )
             
         # Store data and collector for future steps
         self.data.update(user_input)
+        self.collector = collector
+        
+        return await self.async_step_weather_name()
+
+    async def async_step_location_search(self, user_input=None):
+        """Handle the location search step."""
+        data_schema = vol.Schema({
+            vol.Required(CONF_LOCATION_SEARCH): str,
+        })
+
+        if user_input is None:
+            return self.async_show_form(step_id="location_search", data_schema=data_schema)
+
+        search_term = user_input[CONF_LOCATION_SEARCH]
+        errors = {}
+        locations = []
+
+        try:
+            # Use the collector's fetch_with_retry method for consistency
+            import aiohttp
+            headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
+            
+            async with aiohttp.ClientSession(headers=headers) as session:
+                search_url = f"{URL_BASE}{URL_LOCATION_SEARCH}{search_term}"
+                data = await self.search_collector._fetch_with_retry(
+                    session, search_url, "location_search"
+                )
+                
+                if data and "data" in data and data["data"]:
+                    locations = data["data"]
+                else:
+                    errors["base"] = "no_locations_found"
+        except Exception:
+            _LOGGER.exception("Unexpected exception during location search")
+            errors["base"] = "unknown"
+        
+        if errors:
+            return self.async_show_form(
+                step_id="location_search", data_schema=data_schema, errors=errors
+            )
+        
+        if not locations:
+            errors["base"] = "no_locations_found"
+            return self.async_show_form(
+                step_id="location_search", data_schema=data_schema, errors=errors
+            )
+        
+        # Store locations for selection step
+        self.locations = locations
+        return await self.async_step_location_selection()
+
+    async def async_step_location_selection(self, user_input=None):
+        """Handle location selection from search results."""
+        # Create options with name, state and postcode
+        options = {}
+        for location in self.locations:
+            geohash = location.get("geohash", "")
+            name = location.get("name", "")
+            state = location.get("state", "")
+            postcode = location.get("postcode", "")
+            display_name = f"{name}, {state} {postcode}"
+            options[geohash] = display_name
+        
+        data_schema = vol.Schema({
+            vol.Required(CONF_LOCATION_SELECTION): vol.In(options)
+        })
+
+        if user_input is None:
+            return self.async_show_form(step_id="location_selection", data_schema=data_schema)
+
+        # Get the selected location
+        selected_geohash = user_input[CONF_LOCATION_SELECTION]
+        selected_location = next(
+            (loc for loc in self.locations if loc.get("geohash") == selected_geohash),
+            None
+        )
+        
+        if not selected_location:
+            return self.async_abort(reason="location_not_found")
+        
+        # Extract lat/lon from the selected location
+        latitude = selected_location.get("latitude")
+        longitude = selected_location.get("longitude")
+        
+        if latitude is None or longitude is None:
+            return self.async_abort(reason="invalid_location_data")
+        
+        # Create location data
+        location_data = {
+            CONF_LATITUDE: latitude,
+            CONF_LONGITUDE: longitude,
+        }
+        
+        # Validate the location
+        errors, collector = await validate_location(self.hass, location_data)
+        
+        if errors:
+            return self.async_show_form(
+                step_id="location_selection", data_schema=data_schema, errors=errors
+            )
+        
+        # Store data and collector for future steps
+        self.data.update(location_data)
         self.collector = collector
         
         return await self.async_step_weather_name()
@@ -320,6 +460,10 @@ class BomOptionsFlow(config_entries.OptionsFlow):
         self.config_entry = config_entry
         self.data = {}
         self.collector = None
+        self.locations = []
+        # Create a collector with dummy coordinates for API operations
+        # We'll update with real coordinates once we have them
+        self.search_collector = Collector(0, 0)
 
     def get_default_value(self, key, default_value=None):
         """Get default value considering config_entry options and data."""
@@ -328,7 +472,28 @@ class BomOptionsFlow(config_entries.OptionsFlow):
         )
 
     async def async_step_init(self, user_input=None):
-        """Handle the initial step."""
+        """Handle the initial step to choose location input method."""
+        data_schema = vol.Schema(
+            {
+                vol.Required(CONF_LOCATION_METHOD, default=LOCATION_METHOD_LATLON): vol.In(
+                    {
+                        LOCATION_METHOD_LATLON: "Enter latitude/longitude",
+                        LOCATION_METHOD_SEARCH: "Search for a location",
+                    }
+                ),
+            }
+        )
+
+        if user_input is None:
+            return self.async_show_form(step_id="init", data_schema=data_schema)
+
+        if user_input[CONF_LOCATION_METHOD] == LOCATION_METHOD_LATLON:
+            return await self.async_step_latlon()
+        else:
+            return await self.async_step_location_search()
+
+    async def async_step_latlon(self, user_input=None):
+        """Handle the latitude/longitude input step."""
         data_schema = vol.Schema(
             {
                 vol.Required(
@@ -343,17 +508,120 @@ class BomOptionsFlow(config_entries.OptionsFlow):
         )
 
         if user_input is None:
-            return self.async_show_form(step_id="init", data_schema=data_schema)
+            return self.async_show_form(step_id="latlon", data_schema=data_schema)
 
         errors, collector = await validate_location(self.hass, user_input)
         
         if errors:
             return self.async_show_form(
-                step_id="init", data_schema=data_schema, errors=errors
+                step_id="latlon", data_schema=data_schema, errors=errors
             )
             
         # Store data and collector for future steps
         self.data.update(user_input) 
+        self.collector = collector
+        
+        return await self.async_step_weather_name()
+
+    async def async_step_location_search(self, user_input=None):
+        """Handle the location search step."""
+        data_schema = vol.Schema({
+            vol.Required(CONF_LOCATION_SEARCH): str,
+        })
+
+        if user_input is None:
+            return self.async_show_form(step_id="location_search", data_schema=data_schema)
+
+        search_term = user_input[CONF_LOCATION_SEARCH]
+        errors = {}
+        locations = []
+
+        try:
+            # Use the collector's fetch_with_retry method for consistency
+            import aiohttp
+            headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
+            
+            async with aiohttp.ClientSession(headers=headers) as session:
+                search_url = f"{URL_BASE}{URL_LOCATION_SEARCH}{search_term}"
+                data = await self.search_collector._fetch_with_retry(
+                    session, search_url, "location_search"
+                )
+                
+                if data and "data" in data and data["data"]:
+                    locations = data["data"]
+                else:
+                    errors["base"] = "no_locations_found"
+        except Exception:
+            _LOGGER.exception("Unexpected exception during location search")
+            errors["base"] = "unknown"
+        
+        if errors:
+            return self.async_show_form(
+                step_id="location_search", data_schema=data_schema, errors=errors
+            )
+        
+        if not locations:
+            errors["base"] = "no_locations_found"
+            return self.async_show_form(
+                step_id="location_search", data_schema=data_schema, errors=errors
+            )
+        
+        # Store locations for selection step
+        self.locations = locations
+        return await self.async_step_location_selection()
+
+    async def async_step_location_selection(self, user_input=None):
+        """Handle location selection from search results."""
+        # Create options with name, state and postcode
+        options = {}
+        for location in self.locations:
+            geohash = location.get("geohash", "")
+            name = location.get("name", "")
+            state = location.get("state", "")
+            postcode = location.get("postcode", "")
+            display_name = f"{name}, {state} {postcode}"
+            options[geohash] = display_name
+        
+        data_schema = vol.Schema({
+            vol.Required(CONF_LOCATION_SELECTION): vol.In(options)
+        })
+
+        if user_input is None:
+            return self.async_show_form(step_id="location_selection", data_schema=data_schema)
+
+        # Get the selected location
+        selected_geohash = user_input[CONF_LOCATION_SELECTION]
+        selected_location = next(
+            (loc for loc in self.locations if loc.get("geohash") == selected_geohash),
+            None
+        )
+        
+        if not selected_location:
+            return self.async_abort(reason="location_not_found")
+        
+        # Extract lat/lon from the selected location
+        latitude = selected_location.get("latitude")
+        longitude = selected_location.get("longitude")
+        
+        if latitude is None or longitude is None:
+            return self.async_abort(reason="invalid_location_data")
+        
+        # Create location data
+        location_data = {
+            CONF_LATITUDE: latitude,
+            CONF_LONGITUDE: longitude,
+        }
+        
+        # Validate the location
+        errors, collector = await validate_location(self.hass, location_data)
+        
+        if errors:
+            return self.async_show_form(
+                step_id="location_selection", data_schema=data_schema, errors=errors
+            )
+        
+        # Store data and collector for future steps
+        self.data.update(location_data)
         self.collector = collector
         
         return await self.async_step_weather_name()
