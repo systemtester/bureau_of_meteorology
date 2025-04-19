@@ -24,7 +24,7 @@ from .const import (
     FORECAST_SENSOR_TYPES,
     URL_BASE,
 )
-from .PyBoM.collector import Collector
+from .PyBoM.collector import Collector, search_locations
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -4,12 +4,14 @@ import asyncio
 import datetime
 import time
 import logging
+from urllib.parse import quote
 
 from homeassistant.util import Throttle
 
 from .const import (
     MAP_MDI_ICON, URL_BASE, URL_DAILY,
-    URL_HOURLY, URL_OBSERVATIONS, URL_WARNINGS
+    URL_HOURLY, URL_OBSERVATIONS, URL_WARNINGS,
+    URL_LOCATION_SEARCH
 )
 from .helpers import (
     flatten_dict, geohash_encode,
@@ -32,6 +34,7 @@ class Collector:
         self.daily_forecasts_data = None
         self.hourly_forecasts_data = None
         self.warnings_data = None
+        self.search_results = None
         self.geohash7 = geohash_encode(latitude, longitude)
         self.geohash6 = self.geohash7[:6]
         # Cache storage with timestamps
@@ -41,7 +44,10 @@ class Collector:
             "daily_forecasts": {"data": None, "timestamp": 0},
             "hourly_forecasts": {"data": None, "timestamp": 0},
             "warnings": {"data": None, "timestamp": 0},
+            "location_search": {"data": None, "timestamp": 0},
         }
+        # Headers for all API requests
+        self.headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
 
     async def _fetch_with_retry(self, session, url, cache_key):
         """Fetch data with retry mechanism and store in cache if successful."""
@@ -86,16 +92,55 @@ class Collector:
     
     async def get_locations_data(self):
         """Get JSON location name from BOM API endpoint."""
-        headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
         try:
-            async with aiohttp.ClientSession(headers=headers) as session:
+            async with aiohttp.ClientSession(headers=self.headers) as session:
                 data = await self._fetch_with_retry(
                     session, URL_BASE + self.geohash7, "locations"
                 )
                 if data:
                     self.locations_data = data
+                return data
         except Exception as err:
             _LOGGER.error(f"Unexpected error in get_locations_data: {err}")
+            return None
+
+async def search_locations(search_term):
+    """Search for locations by name using BOM API."""
+    headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
+    
+    try:
+        # URL encode the search term
+        from urllib.parse import quote
+        encoded_search = quote(search_term)
+        search_url = f"{URL_BASE}{URL_LOCATION_SEARCH}{encoded_search}"
+        
+        async with aiohttp.ClientSession(headers=headers) as session:
+            # Reuse retry logic similar to the collector but without caching
+            for attempt in range(MAX_RETRIES):
+                try:
+                    async with session.get(search_url) as response:
+                        if response.status == 200:
+                            return await response.json()
+                        else:
+                            _LOGGER.warning(
+                                f"Error searching locations: {response.status}"
+                            )
+                except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                    wait_time = RETRY_DELAY_BASE ** attempt
+                    _LOGGER.warning(
+                        f"Attempt {attempt+1}/{MAX_RETRIES} failed: {err}. "
+                        f"Retrying in {wait_time} seconds..."
+                    )
+                    if attempt < MAX_RETRIES - 1:
+                        await asyncio.sleep(wait_time)
+                    else:
+                        _LOGGER.error(f"Error searching locations: {err}")
+                        return None
+            return None
+    except Exception as err:
+        _LOGGER.error(f"Error searching locations: {err}")
+        return None
+
 
     async def format_daily_forecast_data(self):
         """Format forecast data."""
@@ -122,7 +167,6 @@ class Collector:
             else:
                 d["rain_amount_range"] = f"{d['rain_amount_min']}–{d['rain_amount_max']}"
 
-
     async def format_hourly_forecast_data(self):
         """Format forecast data."""
         if not self.hourly_forecasts_data or "data" not in self.hourly_forecasts_data:
@@ -145,15 +189,30 @@ class Collector:
             else:
                 d["rain_amount_range"] = f"{d['rain_amount_min']} to {d['rain_amount_max']}"
 
-    @Throttle(datetime.timedelta(minutes=5))
-    async def async_update(self):
-        """Refresh the data on the collector object."""
-        headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
+    async def get_data_for_location(self, latitude, longitude):
+        """Get all data for a specific location."""
+        # Update coordinates
+        self.geohash7 = geohash_encode(latitude, longitude)
+        self.geohash6 = self.geohash7[:6]
         
+        # Fetch all data for new location
+        await self.async_update(force_refresh=True)
+        
+        return {
+            "locations": self.locations_data,
+            "observations": self.observations_data,
+            "daily_forecasts": self.daily_forecasts_data,
+            "hourly_forecasts": self.hourly_forecasts_data,
+            "warnings": self.warnings_data
+        }
+
+    @Throttle(datetime.timedelta(minutes=5))
+    async def async_update(self, force_refresh=False):
+        """Refresh the data on the collector object."""
         try:
-            async with aiohttp.ClientSession(headers=headers) as session:
-                # Get location data if not already available
-                if self.locations_data is None:
+            async with aiohttp.ClientSession(headers=self.headers) as session:
+                # Get location data if not already available or forced refresh
+                if self.locations_data is None or force_refresh:
                     data = await self._fetch_with_retry(
                         session, URL_BASE + self.geohash7, "locations"
                     )
