@@ -33,6 +33,13 @@ CONF_OBSERVATIONS_MONITORED: Final = "observations_monitored"
 CONF_WARNINGS_CREATE: Final = "warnings_create"
 CONF_WARNINGS_BASENAME: Final = "warnings_basename"
 
+# New constants for location search - added in v1.3.6
+CONF_LOCATION_METHOD = "location_method"
+CONF_LOCATION_SEARCH = "location_search"
+CONF_LOCATION_SELECTION = "location_selection"
+LOCATION_METHOD_LATLON = "latlon"
+LOCATION_METHOD_SEARCH = "search"
+
 COORDINATOR: Final = "coordinator"
 DOMAIN: Final = "bureau_of_meteorology"
 
