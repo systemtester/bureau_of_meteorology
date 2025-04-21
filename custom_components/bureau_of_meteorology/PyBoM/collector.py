@@ -27,7 +27,7 @@ MAX_CACHE_AGE = 86400  # 24 hours in seconds
 class Collector:
     """Collector for PyBoM."""
 
-    def __init__(self, latitude, longitude):
+    def __init__(self, latitude=None, longitude=None, geohash=None):
         """Init collector."""
         self.locations_data = None
         self.observations_data = None
@@ -35,8 +35,20 @@ class Collector:
         self.hourly_forecasts_data = None
         self.warnings_data = None
         self.search_results = None
-        self.geohash7 = geohash_encode(latitude, longitude)
-        self.geohash6 = self.geohash7[:6]
+
+        if geohash:
+            # Use geohash if provided
+            self.geohash7 = geohash
+            self.geohash6 = geohash[:6]
+        elif latitude is not None and longitude is not None:
+            # Encode latitude and longitude to geohash
+            self.geohash7 = geohash_encode(latitude, longitude)
+            self.geohash6 = self.geohash7[:6]
+        else:
+            # Default geohash if none provided
+            self.geohash7 = None
+            self.geohash6 = None
+        
         # Cache storage with timestamps
         self._cache = {
             "locations": {"data": None, "timestamp": 0},
@@ -104,42 +116,42 @@ class Collector:
             _LOGGER.error(f"Unexpected error in get_locations_data: {err}")
             return None
 
-async def search_locations(search_term):
-    """Search for locations by name using BOM API."""
-    headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
-    
-    try:
-        # URL encode the search term
-        from urllib.parse import quote
-        encoded_search = quote(search_term)
-        search_url = f"{URL_BASE}{URL_LOCATION_SEARCH}{encoded_search}"
+    async def search_locations(search_term):
+        """Search for locations by name using BOM API."""
+        headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
         
-        async with aiohttp.ClientSession(headers=headers) as session:
-            # Reuse retry logic similar to the collector but without caching
-            for attempt in range(MAX_RETRIES):
-                try:
-                    async with session.get(search_url) as response:
-                        if response.status == 200:
-                            return await response.json()
+        try:
+            # URL encode the search term
+            from urllib.parse import quote
+            encoded_search = quote(search_term)
+            search_url = f"{URL_BASE}{URL_LOCATION_SEARCH}{encoded_search}"
+            
+            async with aiohttp.ClientSession(headers=headers) as session:
+                # Reuse retry logic similar to the collector but without caching
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        async with session.get(search_url) as response:
+                            if response.status == 200:
+                                return await response.json()
+                            else:
+                                _LOGGER.warning(
+                                    f"Error searching locations: {response.status}"
+                                )
+                    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                        wait_time = RETRY_DELAY_BASE ** attempt
+                        _LOGGER.warning(
+                            f"Attempt {attempt+1}/{MAX_RETRIES} failed: {err}. "
+                            f"Retrying in {wait_time} seconds..."
+                        )
+                        if attempt < MAX_RETRIES - 1:
+                            await asyncio.sleep(wait_time)
                         else:
-                            _LOGGER.warning(
-                                f"Error searching locations: {response.status}"
-                            )
-                except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                    wait_time = RETRY_DELAY_BASE ** attempt
-                    _LOGGER.warning(
-                        f"Attempt {attempt+1}/{MAX_RETRIES} failed: {err}. "
-                        f"Retrying in {wait_time} seconds..."
-                    )
-                    if attempt < MAX_RETRIES - 1:
-                        await asyncio.sleep(wait_time)
-                    else:
-                        _LOGGER.error(f"Error searching locations: {err}")
-                        return None
+                            _LOGGER.error(f"Error searching locations: {err}")
+                            return None
+                return None
+        except Exception as err:
+            _LOGGER.error(f"Error searching locations: {err}")
             return None
-    except Exception as err:
-        _LOGGER.error(f"Error searching locations: {err}")
-        return None
 
 
     async def format_daily_forecast_data(self):

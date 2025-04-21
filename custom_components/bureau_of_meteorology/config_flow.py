@@ -29,7 +29,7 @@ from .const import (
     LOCATION_METHOD_SEARCH,
 )
 from .PyBoM.const import URL_BASE, URL_LOCATION_SEARCH
-from .PyBoM.collector import Collector, search_locations
+from .PyBoM.collector import Collector
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +59,54 @@ async def validate_location(hass, user_input):
 
     return errors, collector
 
+def get_location_selection_schema(locations):
+    """Generate schema for location selection step."""
+    options = {}
+    for location in locations:
+        geohash = location.get("geohash", "")
+        name = location.get("name", "")
+        state = location.get("state", "")
+        postcode = location.get("postcode", "")
+        display_name = f"{name}, {state} {postcode}"
+        options[geohash] = display_name
+    
+    return vol.Schema({
+        vol.Required(CONF_LOCATION_SELECTION): vol.In(options)
+    })
+
+async def process_location_selection(hass, selected_geohash, data):
+    """Process location selection and return the next step or error."""
+    try:
+        # Create a collector using the geohash directly
+        collector = Collector(geohash=selected_geohash)
+        
+        # Initialize the collector with the geohash data
+        await collector.get_locations_data()
+        
+        if collector.locations_data is None:
+            return {"abort": "invalid_location_data"}, None
+        
+        # Populate observations and daily forecasts data
+        await collector.async_update()
+        
+        # Extract lat/lon from the collector.locations_data for storing in config
+        latitude = collector.locations_data["data"].get("latitude")
+        longitude = collector.locations_data["data"].get("longitude")
+        
+        if latitude is None or longitude is None:
+            return {"abort": "invalid_location_data"}, None
+        
+        # Update data with latitude and longitude
+        data.update({
+            CONF_LATITUDE: latitude,
+            CONF_LONGITUDE: longitude,
+        })
+        
+        return {"success": True}, collector
+        
+    except Exception as exc:
+        _LOGGER.exception("Error occurred while processing location selection: %s", exc)
+        return {"abort": "location_selection_failed"}, None
 
 def get_observations_schema(collector, monitored_default=None):
     """Get schema for observations monitored step."""
@@ -229,63 +277,37 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self.locations = locations
         return await self.async_step_location_selection()
 
-async def async_step_location_selection(self, user_input=None):
-    """Handle location selection from search results."""
-    # Create options with name, state and postcode
-    options = {}
-    for location in self.locations:
-        geohash = location.get("geohash", "")
-        name = location.get("name", "")
-        state = location.get("state", "")
-        postcode = location.get("postcode", "")
-        display_name = f"{name}, {state} {postcode}"
-        options[geohash] = display_name
-    
-    data_schema = vol.Schema({
-        vol.Required(CONF_LOCATION_SELECTION): vol.In(options)
-    })
+    async def async_step_location_selection(self, user_input=None):
+        """
+        Handle the location selection step in the configuration flow.
+        This step presents the user with a form to select a location from the search results.
+        Once a location is selected, it processes the selection and determines the next step
+        in the configuration flow.
+        Args:
+            user_input (dict, optional): The user input from the form. Defaults to None.
+        Returns:
+            FlowResult: The result of the configuration flow step.
+        Raises:
+            Exception: If an unexpected error occurs during processing.
+        """
 
-    if user_input is None:
-        return self.async_show_form(step_id="location_selection", data_schema=data_schema)
+        data_schema = get_location_selection_schema(self.locations)
 
-    # Get the selected location
-    selected_geohash = user_input[CONF_LOCATION_SELECTION]
-    
-    # Instead of extracting latitude and longitude, use the geohash directly
-    # to create a collector or fetch location data
-    
-    try:
-        # Create a collector using the geohash instead of lat/lon
-        collector = Collector(geohash=selected_geohash)
+        if user_input is None:
+            return self.async_show_form(step_id="location_selection", data_schema=data_schema)
+
+        # Get the selected location's geohash
+        selected_geohash = user_input[CONF_LOCATION_SELECTION]
         
-        # Initialize the collector with the geohash data
-        await collector.get_locations_data()
+        result, collector = await process_location_selection(self.hass, selected_geohash, self.data)
         
-        if collector.locations_data is None:
-            return self.async_abort(reason="invalid_location_data")
+        # Handle abort cases
+        if "abort" in result:
+            return self.async_abort(reason=result["abort"])
         
-        # Populate observations and daily forecasts data
-        await collector.async_update()
-        
-        # Extract lat/lon from the collector.locations_data for storing in config
-        latitude = collector.locations_data["data"].get("latitude")
-        longitude = collector.locations_data["data"].get("longitude")
-        
-        if latitude is None or longitude is None:
-            return self.async_abort(reason="invalid_location_data")
-        
-        # Store data and collector for future steps
-        self.data.update({
-            CONF_LATITUDE: latitude,
-            CONF_LONGITUDE: longitude,
-        })
-        self.collector = collector
-        
+        # Handle success case
+        self.collector = collector  
         return await self.async_step_weather_name()
-        
-    except Exception as exc:
-        _LOGGER.exception("Error occurred while processing location selection: %s", exc)
-        return self.async_abort(reason="location_selection_failed")
 
     async def async_step_weather_name(self, user_input=None):
         """Handle the locations step."""
@@ -568,58 +590,22 @@ class BomOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_location_selection(self, user_input=None):
         """Handle location selection from search results."""
-        # Create options with name, state and postcode
-        options = {}
-        for location in self.locations:
-            geohash = location.get("geohash", "")
-            name = location.get("name", "")
-            state = location.get("state", "")
-            postcode = location.get("postcode", "")
-            display_name = f"{name}, {state} {postcode}"
-            options[geohash] = display_name
-        
-        data_schema = vol.Schema({
-            vol.Required(CONF_LOCATION_SELECTION): vol.In(options)
-        })
+        data_schema = get_location_selection_schema(self.locations)
 
         if user_input is None:
             return self.async_show_form(step_id="location_selection", data_schema=data_schema)
 
-        # Get the selected location
+        # Get the selected location's geohash
         selected_geohash = user_input[CONF_LOCATION_SELECTION]
-        selected_location = next(
-            (loc for loc in self.locations if loc.get("geohash") == selected_geohash),
-            None
-        )
         
-        if not selected_location:
-            return self.async_abort(reason="location_not_found")
+        result, collector = await process_location_selection(self.hass, selected_geohash, self.data)
         
-        # Extract lat/lon from the selected location
-        latitude = selected_location.get("latitude")
-        longitude = selected_location.get("longitude")
+        # Handle abort cases
+        if "abort" in result:
+            return self.async_abort(reason=result["abort"])
         
-        if latitude is None or longitude is None:
-            return self.async_abort(reason="invalid_location_data")
-        
-        # Create location data
-        location_data = {
-            CONF_LATITUDE: latitude,
-            CONF_LONGITUDE: longitude,
-        }
-        
-        # Validate the location
-        errors, collector = await validate_location(self.hass, location_data)
-        
-        if errors:
-            return self.async_show_form(
-                step_id="location_selection", data_schema=data_schema, errors=errors
-            )
-        
-        # Store data and collector for future steps
-        self.data.update(location_data)
-        self.collector = collector
-        
+        # Handle success case
+        self.collector = collector  
         return await self.async_step_weather_name()
 
     async def async_step_weather_name(self, user_input=None):
