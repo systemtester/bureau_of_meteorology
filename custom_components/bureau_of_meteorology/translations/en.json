@@ -10,11 +10,35 @@
         },
         "step": {
             "user": {
-                "title": "Set up Australian Bureau of Meteorology",
-                "description": "Latitude and longitude will be used to find the nearest weather station and to generate a forecast for your location. The default values come from your homeassistant \"Home\" zone (See Settings/Areas & Zones/Zones).",
+                "title": "Set up your weather service",
+                "description": "Choose how you want to configure your location. You can either enter latitude and longitude manually or search for a location by name.",
+                "data": {
+                    "location_method": "Choose location input method",
+                    "latitude": "Latitude",
+                    "longitude": "Longitude",
+                    "location_search": "Search for a location"
+                }
+            },
+            "latlon": {
+                "title": "Enter Latitude/Longitude",
+                "description": "Provide the latitude and longitude for your location. These will be used to find the nearest weather station and generate a forecast.  The default values come from your homeassistant \"Home\" zone (See Settings, System, General, Edit Location).",
                 "data": {
                     "latitude": "Latitude",
                     "longitude": "Longitude"
+                }
+            },
+            "location_search": {
+                "title": "Search for a Location",
+                "description": "Enter the name of a location to search for it. You can select the desired location from the search results.",
+                "data": {
+                    "location_search": "Location name"
+                }
+            },
+            "location_selection": {
+                "title": "Select a Location",
+                "description": "Choose a location from the search results.",
+                "data": {
+                    "location_selection": "Select a location"
                 }
             },
             "weather_name": {

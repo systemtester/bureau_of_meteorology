@@ -56,7 +56,6 @@ class Collector:
             "daily_forecasts": {"data": None, "timestamp": 0},
             "hourly_forecasts": {"data": None, "timestamp": 0},
             "warnings": {"data": None, "timestamp": 0},
-            "location_search": {"data": None, "timestamp": 0},
         }
         # Headers for all API requests
         self.headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
@@ -107,7 +106,7 @@ class Collector:
         try:
             async with aiohttp.ClientSession(headers=self.headers) as session:
                 data = await self._fetch_with_retry(
-                    session, URL_BASE + self.geohash7, "locations"
+                    session, f"{URL_BASE}/{self.geohash7}", "locations"
                 )
                 if data:
                     self.locations_data = data
@@ -116,43 +115,43 @@ class Collector:
             _LOGGER.error(f"Unexpected error in get_locations_data: {err}")
             return None
 
-    async def search_locations(search_term):
-        """Search for locations by name using BOM API."""
-        headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
-        
+    async def search_locations(self, search_term):
+        """Search for locations by name without caching."""
         try:
             # URL encode the search term
-            from urllib.parse import quote
             encoded_search = quote(search_term)
             search_url = f"{URL_BASE}{URL_LOCATION_SEARCH}{encoded_search}"
             
-            async with aiohttp.ClientSession(headers=headers) as session:
-                # Reuse retry logic similar to the collector but without caching
+            _LOGGER.debug(f"Searching for location: '{search_term}' at URL: {search_url}")
+            
+            # Create a new session for each search
+            async with aiohttp.ClientSession(headers=self.headers) as session:
                 for attempt in range(MAX_RETRIES):
                     try:
                         async with session.get(search_url) as response:
                             if response.status == 200:
-                                return await response.json()
+                                data = await response.json()
+                                _LOGGER.debug(f"Search results for '{search_term}': {data}")
+                                return data
                             else:
                                 _LOGGER.warning(
-                                    f"Error searching locations: {response.status}"
+                                    f"Error searching locations '{search_term}': {response.status}"
                                 )
                     except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                         wait_time = RETRY_DELAY_BASE ** attempt
                         _LOGGER.warning(
-                            f"Attempt {attempt+1}/{MAX_RETRIES} failed: {err}. "
+                            f"Attempt {attempt+1}/{MAX_RETRIES} failed for '{search_term}': {err}. "
                             f"Retrying in {wait_time} seconds..."
                         )
                         if attempt < MAX_RETRIES - 1:
                             await asyncio.sleep(wait_time)
                         else:
-                            _LOGGER.error(f"Error searching locations: {err}")
+                            _LOGGER.error(f"Error searching locations '{search_term}': {err}")
                             return None
                 return None
         except Exception as err:
-            _LOGGER.error(f"Error searching locations: {err}")
+            _LOGGER.error(f"Error searching locations '{search_term}': {err}")
             return None
-
 
     async def format_daily_forecast_data(self):
         """Format forecast data."""
@@ -226,14 +225,14 @@ class Collector:
                 # Get location data if not already available or forced refresh
                 if self.locations_data is None or force_refresh:
                     data = await self._fetch_with_retry(
-                        session, URL_BASE + self.geohash7, "locations"
+                        session, f"{URL_BASE}/{self.geohash7}", "locations"
                     )
                     if data:
                         self.locations_data = data
                 
                 # Get observations data
                 data = await self._fetch_with_retry(
-                    session, URL_BASE + self.geohash6 + URL_OBSERVATIONS, "observations"
+                    session, f"{URL_BASE}/{self.geohash6}{URL_OBSERVATIONS}", "observations"
                 )
                 if data:
                     self.observations_data = data
@@ -251,7 +250,7 @@ class Collector:
 
                 # Get daily forecast data
                 data = await self._fetch_with_retry(
-                    session, URL_BASE + self.geohash6 + URL_DAILY, "daily_forecasts"
+                    session, f"{URL_BASE}/{self.geohash6}{URL_DAILY}", "daily_forecasts"
                 )
                 if data:
                     self.daily_forecasts_data = data
@@ -259,7 +258,7 @@ class Collector:
 
                 # Get hourly forecast data
                 data = await self._fetch_with_retry(
-                    session, URL_BASE + self.geohash6 + URL_HOURLY, "hourly_forecasts"
+                    session, f"{URL_BASE}/{self.geohash6}{URL_HOURLY}", "hourly_forecasts"
                 )
                 if data:
                     self.hourly_forecasts_data = data
@@ -267,7 +266,7 @@ class Collector:
 
                 # Get warnings data
                 data = await self._fetch_with_retry(
-                    session, URL_BASE + self.geohash6 + URL_WARNINGS, "warnings"
+                    session, f"{URL_BASE}/{self.geohash6}{URL_WARNINGS}", "warnings"
                 )
                 if data:
                     self.warnings_data = data

@@ -38,7 +38,7 @@ MAP_UV = {
     None: None,
 }
 
-URL_BASE = "https://api.weather.bom.gov.au/v1/locations/"
+URL_BASE = "https://api.weather.bom.gov.au/v1/locations"
 URL_LOCATION_SEARCH = "?search="
 URL_DAILY = "/forecasts/daily"
 URL_HOURLY = "/forecasts/hourly"

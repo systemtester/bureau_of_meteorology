@@ -80,14 +80,14 @@ async def process_location_selection(hass, selected_geohash, data):
         # Create a collector using the geohash directly
         collector = Collector(geohash=selected_geohash)
         
-        # Initialize the collector with the geohash data
+        # Initialize the collector explicitly with fresh data
         await collector.get_locations_data()
         
         if collector.locations_data is None:
             return {"abort": "invalid_location_data"}, None
         
         # Populate observations and daily forecasts data
-        await collector.async_update()
+        await collector.async_update(force_refresh=True)
         
         # Extract lat/lon from the collector.locations_data for storing in config
         latitude = collector.locations_data["data"].get("latitude")
@@ -237,44 +237,40 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         })
 
         if user_input is None:
+            # Create a completely new collector with a unique timestamp to prevent any chance of caching
+            self.search_collector = Collector(0, 0)
+            self.locations = []  # Explicitly clear the locations list
             return self.async_show_form(step_id="location_search", data_schema=data_schema)
 
         search_term = user_input[CONF_LOCATION_SEARCH]
+        _LOGGER.debug("Searching for location: '%s'", search_term)
+
         errors = {}
-        locations = []
+        self.locations = []  # Reset locations before performing the search
 
         try:
-            # Use the collector's fetch_with_retry method for consistency
-            import aiohttp
-            headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
-            
-            async with aiohttp.ClientSession(headers=headers) as session:
-                search_url = f"{URL_BASE}{URL_LOCATION_SEARCH}{search_term}"
-                data = await self.search_collector._fetch_with_retry(
-                    session, search_url, "location_search"
-                )
-                
-                if data and "data" in data and data["data"]:
-                    locations = data["data"]
-                else:
-                    errors["base"] = "no_locations_found"
-        except Exception:
-            _LOGGER.exception("Unexpected exception during location search")
+            # Perform the search
+            search_data = await self.search_collector.search_locations(search_term)
+
+            if search_data and "data" in search_data and search_data["data"]:
+                self.locations = search_data["data"]  # Update with new search results
+            else:
+                errors["base"] = "no_locations_found"
+        except Exception as exc:
+            _LOGGER.exception("Exception during location search for '%s': %s", search_term, exc)
             errors["base"] = "unknown"
-        
+
         if errors:
             return self.async_show_form(
                 step_id="location_search", data_schema=data_schema, errors=errors
             )
-        
-        if not locations:
+
+        if not self.locations:
             errors["base"] = "no_locations_found"
             return self.async_show_form(
                 step_id="location_search", data_schema=data_schema, errors=errors
             )
-        
-        # Store locations for selection step
-        self.locations = locations
+
         return await self.async_step_location_selection()
 
     async def async_step_location_selection(self, user_input=None):
@@ -491,21 +487,49 @@ class BomOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input=None):
         """Handle the initial step to choose location input method."""
-        data_schema = vol.Schema(
-            {
-                vol.Required(CONF_LOCATION_METHOD, default=LOCATION_METHOD_LATLON): vol.In(
-                    {
-                        LOCATION_METHOD_LATLON: "Enter latitude/longitude",
-                        LOCATION_METHOD_SEARCH: "Search for a location",
-                    }
-                ),
-            }
+        # Check if we have existing location data
+        has_existing_location = (
+            CONF_LATITUDE in self.config_entry.data and 
+            CONF_LONGITUDE in self.config_entry.data
         )
+        
+        # Use a different label for reconfigure flow
+        options = {
+            LOCATION_METHOD_LATLON: "Enter latitude/longitude",
+            LOCATION_METHOD_SEARCH: "Search for a new location",  # Updated label for reconfigure flow
+        }
+        
+        # Add option to keep existing location if one exists
+        if has_existing_location:
+            lat = self.config_entry.data.get(CONF_LATITUDE)
+            lon = self.config_entry.data.get(CONF_LONGITUDE)
+            location_name = self.config_entry.title
+            options["keep_existing"] = f"Keep existing location: {location_name} ({lat}, {lon})"
+        
+        data_schema = vol.Schema({
+            vol.Required(CONF_LOCATION_METHOD, default=LOCATION_METHOD_LATLON): vol.In(options)
+        })
 
         if user_input is None:
             return self.async_show_form(step_id="init", data_schema=data_schema)
 
-        if user_input[CONF_LOCATION_METHOD] == LOCATION_METHOD_LATLON:
+        if user_input[CONF_LOCATION_METHOD] == "keep_existing":
+            # Keep existing location and move to weather name step
+            self.data[CONF_LATITUDE] = self.config_entry.data.get(CONF_LATITUDE)
+            self.data[CONF_LONGITUDE] = self.config_entry.data.get(CONF_LONGITUDE)
+            
+            # Create collector with existing coordinates
+            self.collector = Collector(
+                self.data[CONF_LATITUDE],
+                self.data[CONF_LONGITUDE],
+            )
+            
+            # Initialize the collector
+            await self.collector.get_locations_data()
+            await self.collector.async_update()
+            
+            return await self.async_step_weather_name()
+        elif user_input[CONF_LOCATION_METHOD] == LOCATION_METHOD_LATLON:
             return await self.async_step_latlon()
         else:
             return await self.async_step_location_search()
@@ -548,29 +572,45 @@ class BomOptionsFlow(config_entries.OptionsFlow):
         })
 
         if user_input is None:
+            # Create a completely new collector with a unique timestamp to prevent any chance of caching
+            self.search_collector = None  # First set to None to ensure any references are cleared
+            self.search_collector = Collector(0, 0)
+            
+            # Explicitly clear the locations list
+            self.locations = []
+            
+            # Add debug logging
+            _LOGGER.debug("Reset search collector and locations list in location_search step")
             return self.async_show_form(step_id="location_search", data_schema=data_schema)
 
         search_term = user_input[CONF_LOCATION_SEARCH]
+        _LOGGER.debug("Searching for location: '%s'", search_term)
+        
         errors = {}
-        locations = []
-
+        
         try:
-            # Use the collector's fetch_with_retry method for consistency
-            import aiohttp
-            headers = {"User-Agent": "MakeThisAPIOpenSource/1.0.0"}
+            # Create a new collector for this specific search to avoid any shared state
+            search_collector = Collector(0, 0)
             
-            async with aiohttp.ClientSession(headers=headers) as session:
-                search_url = f"{URL_BASE}{URL_LOCATION_SEARCH}{search_term}"
-                data = await self.search_collector._fetch_with_retry(
-                    session, search_url, "location_search"
-                )
-                
-                if data and "data" in data and data["data"]:
-                    locations = data["data"]
-                else:
-                    errors["base"] = "no_locations_found"
-        except Exception:
-            _LOGGER.exception("Unexpected exception during location search")
+            # Add explicit debug logging before search
+            _LOGGER.debug("Created new collector for search term: '%s'", search_term)
+            
+            # Use the search_locations method
+            search_data = await search_collector.search_locations(search_term)
+            
+            # Add debug logging after search
+            _LOGGER.debug("Search results for '%s': %s", search_term, search_data)
+            
+            if search_data and "data" in search_data and search_data["data"]:
+                # Reset locations to ensure no old data persists
+                self.locations = []
+                self.locations = search_data["data"]
+                _LOGGER.debug("Found %d locations for '%s'", len(self.locations), search_term)
+            else:
+                _LOGGER.debug("No locations found for '%s'", search_term)
+                errors["base"] = "no_locations_found"
+        except Exception as exc:
+            _LOGGER.exception("Exception during location search for '%s': %s", search_term, exc)
             errors["base"] = "unknown"
         
         if errors:
@@ -578,14 +618,12 @@ class BomOptionsFlow(config_entries.OptionsFlow):
                 step_id="location_search", data_schema=data_schema, errors=errors
             )
         
-        if not locations:
+        if not self.locations:
             errors["base"] = "no_locations_found"
             return self.async_show_form(
                 step_id="location_search", data_schema=data_schema, errors=errors
             )
         
-        # Store locations for selection step
-        self.locations = locations
         return await self.async_step_location_selection()
 
     async def async_step_location_selection(self, user_input=None):
@@ -604,16 +642,19 @@ class BomOptionsFlow(config_entries.OptionsFlow):
         if "abort" in result:
             return self.async_abort(reason=result["abort"])
         
-        # Handle success case
-        self.collector = collector  
+        # Handle success case - EXPLICITLY assign all properties of the collector
+        self.collector = collector
+        
+        # Force update of instance properties to ensure they're using the new location data
         return await self.async_step_weather_name()
 
     async def async_step_weather_name(self, user_input=None):
         """Handle the locations step."""
-        default_name = self.get_default_value(
-            CONF_WEATHER_NAME, 
-            self.collector.locations_data["data"]["name"]
-        )
+        # Ensure we have fresh data for this step
+        if hasattr(self, 'collector') and self.collector and self.collector.locations_data:
+            default_name = self.collector.locations_data["data"]["name"]
+        else:
+            default_name = self.get_default_value(CONF_WEATHER_NAME, "")
         
         data_schema = vol.Schema({
             vol.Required(CONF_WEATHER_NAME, default=default_name): str,
